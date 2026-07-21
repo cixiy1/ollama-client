@@ -23,3 +23,15 @@ Thumbs.db
 
 # 本地日志
 *.log
+
+# 证书 / 密钥 / 敏感配置
+*.pem
+*.der
+*.crt
+*.key
+.env
+.env.*
+
+# 本地测试 / 调试文件
+_debug/
+*.tmp
