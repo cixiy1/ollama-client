@@ -3,7 +3,7 @@
 import sys
 import argparse
 import io
-from cli.api import OllamaAPI, DEFAULT_BASE_URL
+from cli.api import YukiAPI, DEFAULT_BASE_URL
 from rich.console import Console, Group
 from rich.table import Table
 from rich.panel import Panel
@@ -21,7 +21,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 console = Console(legacy_windows=False, force_terminal=True)
 
 
-def cmd_status(api: OllamaAPI):
+def cmd_status(api: YukiAPI):
     """状态检测"""
     if api.ping():
         lines = [f"[green]●[/] 服务在线   [dim]{api.base_url}[/]"]
@@ -54,7 +54,7 @@ def cmd_status(api: OllamaAPI):
         sys.exit(1)
 
 
-def cmd_list(api: OllamaAPI):
+def cmd_list(api: YukiAPI):
     """列出所有模型"""
     try:
         models = api.list_models()
@@ -87,7 +87,7 @@ def cmd_list(api: OllamaAPI):
     console.print(table)
 
 
-def cmd_info(api: OllamaAPI, name: str):
+def cmd_info(api: YukiAPI, name: str):
     """查看模型详情"""
     try:
         info = api.show_model_info(name)
@@ -101,7 +101,7 @@ def cmd_info(api: OllamaAPI, name: str):
         sys.exit(1)
 
 
-def cmd_pull(api: OllamaAPI, name: str):
+def cmd_pull(api: YukiAPI, name: str):
     """拉取模型"""
     console.print(f"[cyan]开始拉取模型:[/] {name} ...")
     try:
@@ -113,7 +113,7 @@ def cmd_pull(api: OllamaAPI, name: str):
         sys.exit(1)
 
 
-def cmd_delete(api: OllamaAPI, name: str):
+def cmd_delete(api: YukiAPI, name: str):
     """删除模型"""
     if api.delete_model(name):
         console.print(f"[green][OK][/] 已删除模型: {name}")
@@ -245,7 +245,7 @@ def _stream_and_render(stream, title: str = "") -> str:
     return answer_buf
 
 
-def cmd_chat(api: OllamaAPI, model: str, system: str | None, temp: float, stdin: bool):
+def cmd_chat(api: YukiAPI, model: str, system: str | None, temp: float, stdin: bool):
     """交互式对话"""
     messages = []
     if system:
@@ -304,7 +304,7 @@ def cmd_chat(api: OllamaAPI, model: str, system: str | None, temp: float, stdin:
         console.print()
 
 
-def cmd_generate(api: OllamaAPI, model: str, prompt: str, temp: float):
+def cmd_generate(api: YukiAPI, model: str, prompt: str, temp: float):
     """单次生成"""
     console.print()
     console.rule(f"[bold cyan]🧠 生成[/] [green]{model}[/]")
@@ -318,7 +318,7 @@ def cmd_generate(api: OllamaAPI, model: str, prompt: str, temp: float):
         sys.exit(1)
 
 
-def cmd_running(api: OllamaAPI):
+def cmd_running(api: YukiAPI):
     """查看当前加载的模型"""
     try:
         models = api.running_models()
@@ -344,7 +344,7 @@ def cmd_running(api: OllamaAPI):
     console.print(table)
 
 
-def _pick_model(api: OllamaAPI, prompt_text: str = "选择模型序号") -> str | None:
+def _pick_model(api: YukiAPI, prompt_text: str = "选择模型序号") -> str | None:
     """列出模型并让用户选择，返回模型名"""
     try:
         models = api.list_models()
@@ -372,7 +372,7 @@ def _pick_model(api: OllamaAPI, prompt_text: str = "选择模型序号") -> str 
         console.print("[yellow]输入无效，请重新选择[/]")
 
 
-def interactive(api: OllamaAPI):
+def interactive(api: YukiAPI):
     """交互式主界面 —— 运行即用，无需记命令"""
     console.print()
     console.print(
@@ -526,7 +526,7 @@ def main():
 
     args = parser.parse_args()
 
-    api = OllamaAPI(base_url=args.url, timeout=args.timeout)
+    api = YukiAPI(base_url=args.url, timeout=args.timeout)
 
     # 不带子命令时进入交互式主界面（运行即用）
     if not args.command:

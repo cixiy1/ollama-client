@@ -1,8 +1,8 @@
 # Yuki Code
 
-本地 AI 代码助手 — Codex / Open Code 同类产品。
+本地 AI 代码助手（Vibe Coding 工具），支持调用本地 Ollama 模型进行代码补全、对话和推理。
 
-基于本地 Ollama 模型，提供**交互式终端界面**与**命令行（CLI）**两种使用方式，也可作为 Python 库直接调用。
+基于 [`rich`](https://pypi.org/project/rich/) 实现，无重型依赖，连接任意兼容 Ollama API 的本地模型。与**命令行（CLI）**两种使用方式，也可作为 Python 库直接调用。
 
 基于 [`requests`](https://pypi.org/project/requests/) 与 [`rich`](https://pypi.org/project/rich/) 实现，无重型依赖。
 
@@ -10,19 +10,19 @@
 
 ## 功能特性
 
-- :electric_plug: **服务检测** — 检测本地 Ollama 服务是否在线
+- :electric_plug: **服务检测** — 检测 Ollama 服务（或其他兼容 API）是否在线
 - :clipboard: **模型管理** — 列出 / 查看详情 / 拉取 / 删除本地模型
 - :speech_balloon: **流式对话** — 实时流式输出，`Ctrl+C` 可中断
 - :memo: **单次生成** — 一次性 prompt 生成
 - :desktop_computer: **交互式终端界面** — 序号菜单，无需记命令
 - :brain: **推理模型兼容** — 同时兼容独立 `thinking` 字段（如 `qwen3`）与 `<think>` 内嵌标签（如 `deepseek-r1`）
-- :rocket: **查看加载** — 查看 Ollama 当前已加载到内存的模型
+- :rocket: **查看加载** — 查看当前已加载到内存的模型
 
 ---
 
 ## 安装
 
-需要 Python 3.10+ 以及已运行的 [Ollama](https://ollama.com) 服务。
+需要 Python 3.10+ 以及一个运行中的 Ollama 兼容服务（默认 `http://localhost:11434`）。
 
 ```bash
 # 从源码安装（可编辑模式）
@@ -90,9 +90,9 @@ yuki --url http://192.168.1.10:11434 list
 除了命令行，也可以在自己的 Python 项目中直接导入使用：
 
 ```python
-from cli.api import OllamaAPI
+from cli.api import YukiAPI
 
-api = OllamaAPI()  # 默认 http://localhost:11434
+api = YukiAPI()  # 默认 http://localhost:11434
 
 # 检测服务
 if not api.ping():
@@ -116,7 +116,7 @@ result = "".join(
 print(result)
 ```
 
-`OllamaAPI` 主要方法：
+`YukiAPI` 主要方法：
 
 | 方法 | 说明 |
 |------|------|
@@ -140,7 +140,7 @@ yuki-code/
 ├── cli/                  # 终端界面
 │   ├── __init__.py      # 包元信息 / 版本
 │   ├── __main__.py      # 运行入口（python -m cli）
-│   ├── api.py           # Ollama HTTP API 封装
+│   ├── api.py           # AI 模型调用层（Ollama API 兼容）
 │   └── main.py          # 交互式菜单 + CLI 子命令
 ├── pyproject.toml
 ├── requirements.txt

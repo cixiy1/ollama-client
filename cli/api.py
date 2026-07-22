@@ -1,4 +1,4 @@
-"""Yuki Code - Ollama API 客户端"""
+"""Yuki Code — AI 模型调用层"""
 
 import requests
 from typing import Iterator, Optional
@@ -46,7 +46,7 @@ class Model:
     digest: str
 
 
-class OllamaAPI:
+class YukiAPI:
     def __init__(self, base_url: str = DEFAULT_BASE_URL, timeout: int = 120):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -56,7 +56,7 @@ class OllamaAPI:
     # ---- 检测服务 ----
 
     def ping(self) -> bool:
-        """检查 Ollama 服务是否在线"""
+        """检查服务是否在线"""
         try:
             r = self._session.get(f"{self.base_url}/", timeout=5)
             return r.status_code == 200
