@@ -29,10 +29,11 @@ CONTEXT_PATTERNS = [
     "opencode.md",
     "opencode.local.md",
     "agent.md",
+    "AGENTS.md",
     ".context.md",
-    # 根目录配置
-    "README.md",
 ]
+# 注意：README.md 不在自动上下文内 —— 它是给人看的项目文档，
+# 会喧宾夺主污染 prompt（尤其小模型）。如需可用 --context README.md 显式加载。
 
 # 目录类模式（递归搜索该目录下所有 .md 文件）
 DIRECTORY_PATTERNS = {
@@ -49,9 +50,6 @@ class ContextFile:
     content: str
     source: str           # 文件名（含路径）
     priority: int         # 优先级（越小越重要）
-
-
-from dataclasses import dataclass
 
 
 def _load_text(path: Path, max_size: int = 200_000) -> str | None:

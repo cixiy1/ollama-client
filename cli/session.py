@@ -11,6 +11,16 @@ from typing import Iterator
 from datetime import datetime
 
 
+# ---- 工具函数 ----
+
+def _sanitize(text: str) -> str:
+    """清除字符串中的孤立代理对（surrogate），避免 SQLite/UTF-8 写入崩溃。
+    典型来源：终端 GBK 乱码、不完整的 emoji 字节。"""
+    if not text:
+        return text
+    return text.encode("utf-8", "replace").decode("utf-8", "replace")
+
+
 # ---- 数据模型 ----
 
 @dataclass
@@ -174,8 +184,8 @@ class SessionStore:
             conn.execute(
                 "INSERT INTO messages (id,session_id,role,content,thinking,model,timestamp) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (mid, session_id, message.role, message.content,
-                 message.thinking, message.model, message.timestamp),
+                (mid, session_id, message.role, _sanitize(message.content),
+                 _sanitize(message.thinking), message.model, message.timestamp),
             )
             conn.execute(
                 "UPDATE sessions SET updated_at=? WHERE id=?",

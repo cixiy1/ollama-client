@@ -354,12 +354,18 @@ def cmd_chat(api: YukiAPI, model: str, system: str | None, temp: float,
         messages = inject_into_messages(contexts, messages)
 
     if stdin:
-        content = sys.stdin.read()
+        content = sys.stdin.read().strip()
         messages.append({"role": "user", "content": content})
         console.print(f"[cyan]You (pipe):[/] {content[:100]}...")
-        _stream_and_render(
+        _session_store.add_message(session.id, Message(
+            role="user", content=content, model=model))
+        response = _stream_and_render(
             api.chat(model, messages, temperature=temp, stream=True),
             title=model)
+        _session_store.add_message(session.id, Message(
+            role="assistant", content=response, model=model))
+        if session.title == "新对话":
+            _session_store.auto_title(session.id)
         return
 
     while True:
