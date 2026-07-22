@@ -35,3 +35,4 @@ Thumbs.db
 # 本地测试 / 调试文件
 _debug/
 *.tmp
+.pytest_cache/

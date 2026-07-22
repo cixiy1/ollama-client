@@ -89,7 +89,8 @@ class GlobTool(BaseTool):
         if not pattern:
             return ToolResponse(content="缺少 pattern 参数", is_error=True)
         try:
-            matches = _glob.glob(pattern, root_dir=root)
+            recursive = "**" in pattern
+            matches = _glob.glob(pattern, root_dir=root, recursive=recursive)
             if not matches:
                 return ToolResponse(content="未找到匹配文件")
             return ToolResponse(
@@ -122,36 +123,87 @@ class GrepTool(BaseTool):
                     "type": "boolean",
                     "description": "是否将 pattern 作为字面量（非正则）",
                 },
+                "max_results": {
+                    "type": "integer",
+                    "description": "最多返回多少条匹配，默认 200",
+                },
             },
             required=["pattern"],
         )
 
+    # 默认跳过的目录/扩展名（避免扫描大量无关文件）
+    _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv",
+                  ".idea", ".vscode", "dist", "build", ".mypy_cache",
+                  ".pytest_cache", ".yuki-code"}
+    _BINARY_EXT = {".pyc", ".exe", ".dll", ".so", ".dylib", ".zip", ".gz",
+                   ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".db",
+                   ".sqlite", ".woff", ".woff2", ".ttf", ".mp4", ".mp3"}
+
     def run(self, params: dict) -> ToolResponse:
+        import fnmatch
         pattern = self._param(params, "pattern", "")
         path = self._param(params, "path", ".")
         include = self._param(params, "include", "")
         literal = self._param(params, "literal", False)
+        max_results = int(self._param(params, "max_results", 200))
 
         if not pattern:
             return ToolResponse(content="缺少 pattern 参数", is_error=True)
 
-        flag = "-F" if literal else "-n"
-        cmd = ["grep", flag]
-        if include:
-            cmd.extend(["--include", include])
-        cmd.extend(["-r", "--color=never", pattern, path])
+        # 编译匹配器（纯 Python，跨平台）
+        if literal:
+            def match(line: str) -> bool:
+                return pattern in line
+        else:
+            try:
+                rx = re.compile(pattern)
+            except re.error as e:
+                return ToolResponse(content=f"无效正则: {e}", is_error=True)
+            match = lambda line: bool(rx.search(line))
 
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True,
-                                   timeout=30)
-            out = result.stdout.strip()
-            if not out:
-                return ToolResponse(content="未找到匹配内容")
-            return ToolResponse(content=out)
-        except subprocess.TimeoutExpired:
-            return ToolResponse(content="grep 超时（>30s）", is_error=True)
-        except Exception as e:
-            return ToolResponse(content=str(e), is_error=True)
+        p = Path(path)
+        if not p.exists():
+            return ToolResponse(content=f"路径不存在: {path}", is_error=True)
+
+        # 收集待搜文件
+        files: list[Path] = []
+        if p.is_file():
+            files = [p]
+        else:
+            for fp in p.rglob("*"):
+                if not fp.is_file():
+                    continue
+                if any(part in self._SKIP_DIRS for part in fp.parts):
+                    continue
+                if fp.suffix.lower() in self._BINARY_EXT:
+                    continue
+                if include and not fnmatch.fnmatch(fp.name, include):
+                    continue
+                files.append(fp)
+
+        results: list[str] = []
+        truncated = False
+        for fp in files:
+            try:
+                with fp.open("r", encoding="utf-8", errors="ignore") as f:
+                    for lineno, line in enumerate(f, 1):
+                        if match(line):
+                            rel = fp.as_posix()
+                            results.append(f"{rel}:{lineno}:{line.rstrip()}")
+                            if len(results) >= max_results:
+                                truncated = True
+                                break
+            except (OSError, UnicodeError):
+                continue
+            if truncated:
+                break
+
+        if not results:
+            return ToolResponse(content="未找到匹配内容")
+        body = "\n".join(results)
+        if truncated:
+            body += f"\n…(已截断，仅显示前 {max_results} 条)"
+        return ToolResponse(content=body)
 
 
 class ReadTool(BaseTool):
