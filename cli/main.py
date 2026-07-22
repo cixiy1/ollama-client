@@ -3,7 +3,7 @@
 import sys
 import argparse
 import io
-from .api import OllamaAPI, DEFAULT_BASE_URL
+from cli.api import OllamaAPI, DEFAULT_BASE_URL
 from rich.console import Console, Group
 from rich.table import Table
 from rich.panel import Panel
@@ -35,7 +35,7 @@ def cmd_status(api: OllamaAPI):
         console.print(
             Panel(
                 "\n".join(lines),
-                title="[bold green]Ollama 状态[/]",
+                title="[bold green]Yuki Code 状态[/]",
                 border_style="green",
                 box=box.ROUNDED,
                 expand=False,
@@ -45,7 +45,7 @@ def cmd_status(api: OllamaAPI):
         console.print(
             Panel(
                 f"[red]✗ 服务未启动[/]\n[dim]请先运行 [bold]ollama serve[/][/]",
-                title="[red]Ollama 状态[/]",
+                title="[red]Yuki Code 状态[/]",
                 border_style="red",
                 box=box.ROUNDED,
                 expand=False,
@@ -191,7 +191,7 @@ def _stream_and_render(stream, title: str = "") -> str:
 
     header = (
         Panel(
-            Align.center(f"[bold cyan]{title}[/]" if title else "[bold cyan]Ollama[/]"),
+            Align.center(f"[bold cyan]{title}[/]" if title else "[bold cyan]Yuki Code[/]"),
             border_style="bright_blue",
             box=box.DOUBLE,
             padding=(0, 1),
@@ -377,7 +377,7 @@ def interactive(api: OllamaAPI):
     console.print()
     console.print(
         Panel(
-            "[bold cyan]Ollama Client[/]\n[dim]本地大模型对接工具[/]",
+            "[bold cyan]Yuki Code[/]\n[dim]本地 AI 代码助手[/]",
             box=box.DOUBLE,
             border_style="cyan",
             padding=(0, 4),

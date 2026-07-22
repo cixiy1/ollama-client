@@ -3,11 +3,11 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ollama-client"
+name = "yuki-code"
 version = "1.0.0"
-description = "本地 Ollama 模型对接 CLI 工具"
+description = "Yuki Code — 本地 AI 代码助手"
 requires-python = ">=3.10"
 dependencies = ["requests>=2.31.0", "rich>=13.7.0"]
 
 [project.scripts]
-ollama-client = "ollama_client.__main__:main"
+yuki = "cli.__main__:main"

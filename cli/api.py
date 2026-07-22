@@ -1,4 +1,4 @@
-"""Ollama API 客户端"""
+"""Yuki Code - Ollama API 客户端"""
 
 import requests
 from typing import Iterator, Optional
