@@ -441,6 +441,221 @@ def cmd_chat(api: YukiAPI, model: str, system: str | None, temp: float,
         console.print()
 
 
+# ---- Agentic 工具调用循环 ----
+
+DANGEROUS_TOOLS = {"write", "edit", "bash"}
+MAX_AGENT_ITERS = 25
+
+AGENT_SYSTEM_PROMPT = """你是 Yuki Code，一个运行在用户终端里的 AI 代码助手。
+你可以调用工具来读写文件、搜索代码、执行命令，帮用户完成编程任务。
+
+原则：
+- 需要了解代码/文件时，主动用 read/grep/glob/ls 工具，不要凭空猜。
+- 修改代码优先用 edit（精确替换）而非 write（全文覆盖）。
+- 每次只做必要的工具调用，完成任务后直接用自然语言回复总结，不再调工具。
+- 中文回复。"""
+
+
+def _tool_result_message(provider_type: str, tc, result_text: str) -> dict:
+    """构造回填给模型的 tool 角色消息"""
+    if provider_type == "ollama":
+        return {"role": "tool", "content": result_text, "tool_name": tc.name}
+    return {"role": "tool", "tool_call_id": tc.id or tc.name,
+            "content": result_text}
+
+
+def _assistant_toolcall_message(provider_type: str, result) -> dict:
+    """构造含 tool_calls 的 assistant 消息，回填对话历史"""
+    if provider_type == "ollama":
+        return {
+            "role": "assistant",
+            "content": result.content or "",
+            "tool_calls": [
+                {"function": {"name": tc.name, "arguments": tc.arguments}}
+                for tc in result.tool_calls
+            ],
+        }
+    return {
+        "role": "assistant",
+        "content": result.content or "",
+        "tool_calls": [
+            {"id": tc.id or tc.name, "type": "function",
+             "function": {"name": tc.name,
+                          "arguments": tc.raw_arguments or json.dumps(tc.arguments, ensure_ascii=False)}}
+            for tc in result.tool_calls
+        ],
+    }
+
+
+def _render_tool_call(tc, index: int):
+    """展示一个工具调用"""
+    args_preview = json.dumps(tc.arguments, ensure_ascii=False)
+    if len(args_preview) > 300:
+        args_preview = args_preview[:300] + "…"
+    danger = "[red]⚠ [/]" if tc.name in DANGEROUS_TOOLS else "[cyan]⚙ [/]"
+    console.print(Panel(
+        f"{danger}[bold]{tc.name}[/]\n[dim]{args_preview}[/]",
+        title=f"[yellow]工具调用 #{index}[/]",
+        border_style="yellow" if tc.name in DANGEROUS_TOOLS else "cyan",
+        box=box.ROUNDED, expand=False, padding=(0, 1)))
+
+
+def cmd_agent(api: YukiAPI, model: str, system: str | None, temp: float,
+              auto_approve: bool = False, session_id: str | None = None,
+              cwd: str | None = None, one_shot: str | None = None):
+    """
+    Agent 模式——模型可自主调用工具完成编程任务。
+    循环：模型输出 tool_calls → 执行（危险操作确认）→ 回填结果 → 再调，
+    直到模型不再返回 tool_calls（给出最终回答）。
+    """
+    work_dir = os.path.abspath(cwd or os.getcwd())
+    tools_schema = _tool_registry.to_openai_format()
+    tool_names = {t.info().name for t in _tool_registry.list()}
+    # 切到工作目录，让工具的相对路径正确解析（真实编程 CLI 均如此）
+    _orig_cwd = os.getcwd()
+    try:
+        os.chdir(work_dir)
+    except OSError:
+        work_dir = _orig_cwd
+
+    # 会话
+    if session_id:
+        session = _session_store.get_session(session_id)
+        if session:
+            messages = [{"role": m.role, "content": m.content} for m in session.messages]
+        else:
+            session = _session_store.create_session(
+                provider=api.provider.label or api.provider.type, model=model)
+            messages = []
+    else:
+        session = _session_store.create_session(
+            provider=api.provider.label or api.provider.type, model=model)
+        messages = []
+
+    # system prompt（agent 专用 + 上下文 + 用户自定义）
+    if not any(m.get("role") == "system" for m in messages):
+        sys_parts = [AGENT_SYSTEM_PROMPT]
+        ctx_text = load_context_for_directory(work_dir)
+        if ctx_text:
+            sys_parts.append("# 项目上下文\n" + ctx_text)
+        if system:
+            sys_parts.append(system)
+        messages.insert(0, {"role": "system", "content": "\n\n".join(sys_parts)})
+
+    console.print()
+    console.print(Rule(f"[bold magenta][agent] 智能代理[/]  [cyan]{model}[/]"
+                       f"[dim]  会话 {session.id[:8]}[/]"))
+    approve_hint = "[green]自动批准已开[/]" if auto_approve else "[dim]危险操作需确认[/]"
+    console.print(f"[dim]工具: {len(tools_schema)} 个  |  {approve_hint}  |  指令: /quit[/]\n")
+
+    def run_one(user_input: str):
+        nonlocal auto_approve
+        messages.append({"role": "user", "content": user_input})
+        _session_store.add_message(session.id, Message(
+            role="user", content=user_input, model=model))
+        for iteration in range(1, MAX_AGENT_ITERS + 1):
+            try:
+                with console.status(f"[cyan]思考中… (第 {iteration} 轮)[/]", spinner="dots"):
+                    result = api.chat_once(model, messages, temperature=temp,
+                                           tools=tools_schema, tool_names=tool_names)
+            except Exception as e:
+                console.print(f"[red]调用失败: {e}[/]")
+                return
+
+            if result.thinking.strip():
+                console.print(Panel(
+                    Text(result.thinking.strip(), style="dim", overflow="fold"),
+                    title="[yellow][think] 推理[/]", title_align="left",
+                    border_style="yellow", box=box.ROUNDED, padding=(0, 2)))
+
+            if not result.tool_calls:
+                # 最终回答
+                answer = _strip_think_tags(result.content).strip()
+                console.print(Panel(
+                    Text(answer or "(无内容)", style="white", overflow="fold"),
+                    title="[bold green] 回答[/]", title_align="left",
+                    border_style="green", box=box.ROUNDED, padding=(1, 2)))
+                messages.append({"role": "assistant", "content": answer})
+                _session_store.add_message(session.id, Message(
+                    role="assistant", content=answer, model=model))
+                if session.title == "新对话":
+                    _session_store.auto_title(session.id)
+                return
+
+            if result.content.strip():
+                console.print(f"[white]{_strip_think_tags(result.content).strip()}[/]")
+
+            # 回填 assistant 的 tool_calls 消息
+            messages.append(_assistant_toolcall_message(
+                api.provider.type, result))
+
+            # 逐个执行工具
+            for i, tc in enumerate(result.tool_calls, 1):
+                _render_tool_call(tc, i)
+                # 危险操作确认
+                if tc.name in DANGEROUS_TOOLS and not auto_approve:
+                    try:
+                        ans = console.input(
+                            f"[red]执行 {tc.name}? (y/回车跳过/a=本轮全准):[/] "
+                        ).strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        ans = ""
+                    if ans == "a":
+                        auto_approve = True
+                    elif ans != "y":
+                        msg = _tool_result_message(
+                            api.provider.type, tc, "[用户拒绝执行此工具]")
+                        messages.append(msg)
+                        _session_store.add_message(session.id, Message(
+                            role="tool", content="[用户拒绝]", model=model))
+                        console.print("[dim]已跳过[/]")
+                        continue
+                tool_res = _tool_registry.execute(tc.name, tc.arguments)
+                out = tool_res.to_text()
+                preview = out if len(out) <= 1500 else out[:1500] + "\n…(截断)"
+                console.print(Panel(
+                    Text(preview, style="dim" if not tool_res.is_error else "red",
+                         overflow="fold"),
+                    title=f"[{'red' if tool_res.is_error else 'green'}]↳ 结果[/]",
+                    border_style="red" if tool_res.is_error else "green",
+                    box=box.ROUNDED, padding=(0, 2), expand=False))
+                messages.append(_tool_result_message(api.provider.type, tc, out))
+                _session_store.add_message(session.id, Message(
+                    role="tool", content=out[:2000], model=model))
+        console.print("[yellow]已达到最大迭代次数，停止。[/]")
+
+    try:
+        # 单次任务模式
+        if one_shot:
+            run_one(one_shot)
+            return
+
+        # 交互循环
+        while True:
+            try:
+                user_input = console.input("[magenta]Agent >[/] ").strip()
+            except (EOFError, KeyboardInterrupt):
+                console.print("\n[dim]退出 agent[/]")
+                break
+            if not user_input:
+                continue
+            if user_input in ("/quit", "/exit", "quit", "exit"):
+                console.print("[dim]退出 agent[/]")
+                break
+            if user_input == "/clear":
+                messages = [m for m in messages if m.get("role") == "system"]
+                console.print("[dim]历史已清除[/]")
+                continue
+            console.print()
+            run_one(user_input)
+            console.print()
+    finally:
+        try:
+            os.chdir(_orig_cwd)
+        except OSError:
+            pass
+
+
 def cmd_generate(api: YukiAPI, model: str, prompt: str, temp: float,
                  cwd: str | None = None):
     console.print()
@@ -678,6 +893,7 @@ def interactive(args):
         console.print(f"[dim]  上下文:[/] {summarize_contexts(contexts)}")
 
     menu = (
+        "  [bold magenta]a[/]  [agent] 智能代理（可调工具写代码）\n"
         "  [bold yellow]1[/]  [chat]  与模型对话\n"
         "  [bold yellow]2[/]  [hist] 恢复历史会话\n"
         "  [bold yellow]3[/]  [list]  列出所有可用模型\n"
@@ -704,6 +920,10 @@ def interactive(args):
         if choice in ("0", "q", "quit", "exit"):
             console.print("[dim]再见[/]")
             break
+        elif choice == "a":
+            model = _pick_model(api, "选择 agent 模型（建议支持 tools 的，如 qwen2.5-coder）")
+            if model:
+                cmd_agent(api, model, None, 0.3, cwd=work_dir)
         elif choice == "1":
             model = _pick_model(api, "选择对话模型")
             if model:
@@ -913,6 +1133,18 @@ Provider 管理:
     chat_p.add_argument("--session", dest="session_id", help="指定会话 ID 恢复")
     chat_p.add_argument("--cwd", dest="cwd", help="工作目录（用于上下文感知）")
 
+    # agent
+    agent_p = sub.add_parser("agent", help="智能代理模式（模型可自主调用工具）")
+    agent_p.add_argument("model", help="模型名称（建议支持 function calling 的）")
+    agent_p.add_argument("--system", help="额外系统提示词")
+    agent_p.add_argument("--temp", type=float, default=0.3)
+    agent_p.add_argument("--yes", "-y", dest="auto_approve", action="store_true",
+                         help="自动批准危险工具（write/edit/bash）")
+    agent_p.add_argument("--prompt", "-p", dest="one_shot",
+                         help="单次任务模式，执行完退出")
+    agent_p.add_argument("--session", dest="session_id", help="恢复会话")
+    agent_p.add_argument("--cwd", dest="cwd", help="工作目录")
+
     # generate
     gen_p = sub.add_parser("generate", help="单次生成")
     gen_p.add_argument("model", help="模型名称")
@@ -1010,6 +1242,11 @@ Provider 管理:
         case "chat":
             cmd_chat(api, args.model, args.system, args.temp,
                     args.stdin, args.session_id, work_dir)
+        case "agent":
+            cmd_agent(api, args.model, args.system, args.temp,
+                      auto_approve=args.auto_approve,
+                      session_id=args.session_id, cwd=work_dir,
+                      one_shot=args.one_shot)
         case "generate":
             cmd_generate(api, args.model, args.prompt, args.temp, work_dir)
         case "running":

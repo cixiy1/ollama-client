@@ -41,6 +41,27 @@ class StreamEvent:
     model: str = ""
 
 
+@dataclass
+class ToolCall:
+    """归一化后的工具调用（屏蔽 Ollama / OpenAI 格式差异）"""
+    id: str = ""
+    name: str = ""
+    arguments: dict = field(default_factory=dict)
+    raw_arguments: str = ""        # 原始 JSON 字符串（OpenAI 回传用）
+
+
+@dataclass
+class ChatResult:
+    """非流式单轮对话结果"""
+    content: str = ""
+    thinking: str = ""
+    tool_calls: list = field(default_factory=list)   # list[ToolCall]
+    finish_reason: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    raw_message: dict = field(default_factory=dict)  # 原始 assistant 消息（回填对话历史用）
+
+
 # ---- 数据模型 ----
 
 @dataclass
@@ -61,6 +82,60 @@ class Model:
 
     def format_modified(self) -> str:
         return self.modified[:19].replace("T", " ") if self.modified else "未知"
+
+
+# ---- 文本式工具调用 fallback 解析 ----
+
+import re as _re
+
+_QWEN_TOOLCALL = _re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", _re.DOTALL)
+_FENCE_JSON = _re.compile(r"```(?:json|tool_call|tool)?\s*(\{.*?\}|\[.*?\])\s*```", _re.DOTALL)
+
+
+def _extract_text_tool_calls(content: str, tool_names: set[str]) -> list:
+    """
+    当模型未返回原生 tool_calls、却把工具调用写成 content 文本时，
+    从文本里把工具调用 JSON 解析出来。兼容多种格式：
+    - Qwen 风格 <tool_call>{...}</tool_call>
+    - 代码块 ```json {...} ```
+    - 裸 JSON 对象/数组
+    仅当 name 命中已知工具时才视为工具调用，避免误伤。
+    """
+    if not content or not tool_names:
+        return []
+    candidates: list[str] = []
+    candidates += _QWEN_TOOLCALL.findall(content)
+    candidates += _FENCE_JSON.findall(content)
+    if not candidates:
+        s = content.strip()
+        if (s.startswith("{") and s.endswith("}")) or \
+           (s.startswith("[") and s.endswith("]")):
+            candidates.append(s)
+    calls = []
+    for cand in candidates:
+        try:
+            obj = json.loads(cand)
+        except json.JSONDecodeError:
+            continue
+        objs = obj if isinstance(obj, list) else [obj]
+        for o in objs:
+            if not isinstance(o, dict):
+                continue
+            if "tool_call" in o and isinstance(o["tool_call"], dict):
+                o = o["tool_call"]
+            name = o.get("name") or o.get("tool") or o.get("function")
+            if isinstance(name, dict):
+                name = name.get("name")
+            args = (o.get("arguments") or o.get("parameters")
+                    or o.get("args") or o.get("input") or {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {}
+            if name in tool_names and isinstance(args, dict):
+                calls.append(ToolCall(id=str(name), name=str(name), arguments=args))
+    return calls
 
 
 # ---- 思考标签解析 ----
@@ -374,6 +449,165 @@ class YukiAPI:
             model=model,
             finish_reason="stop",
         )
+
+    # ---- Agentic 工具调用（非流式单轮） ----
+
+    def chat_once(
+        self,
+        model: str,
+        messages: list[dict],
+        temperature: float = 0.7,
+        tools: list[dict] | None = None,
+        think: bool = True,
+        tool_names: set[str] | None = None,
+    ) -> ChatResult:
+        """
+        非流式单轮对话，支持工具调用。返回 ChatResult。
+        用于 agent loop：模型可能返回 tool_calls，上层执行后回填再调。
+        tool_names：已知工具名集合，用于文本 fallback 解析（模型不支持原生 tool_calls 时）。
+        """
+        if self.provider.type == "ollama":
+            result = self._chat_once_ollama(model, messages, temperature, tools, think)
+        else:
+            result = self._chat_once_openai(model, messages, temperature, tools, think)
+        # fallback：原生 tool_calls 为空但 content 里藏着工具调用
+        if not result.tool_calls and tool_names and result.content:
+            fallback = _extract_text_tool_calls(result.content, tool_names)
+            if fallback:
+                result.tool_calls = fallback
+                result.content = ""
+        return result
+
+    def _chat_once_ollama(
+        self, model: str, messages: list[dict],
+        temperature: float, tools: list[dict] | None, think: bool,
+    ) -> ChatResult:
+        payload: dict = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": temperature},
+        }
+        if tools:
+            payload["tools"] = tools
+        if think:
+            payload["think"] = True
+        try:
+            resp = self._post("/api/chat", payload, stream=False)
+            if resp.status_code == 400 and think:
+                return self._chat_once_ollama(model, messages, temperature, tools, think=False)
+            resp.raise_for_status()
+            data = resp.json()
+            msg = data.get("message", {})
+            content = msg.get("content", "") or ""
+            thinking = msg.get("thinking", "") or ""
+            # content 内嵌 <think> 标签时拆分
+            if "<think>" in content:
+                t_extra, c_clean = "", ""
+                for kind, piece in _split_think(content):
+                    if kind == "thinking":
+                        t_extra += piece
+                    else:
+                        c_clean += piece
+                thinking = thinking + t_extra
+                content = c_clean
+            tool_calls = []
+            for tc in msg.get("tool_calls", []) or []:
+                fn = tc.get("function", {})
+                args = fn.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {}
+                tool_calls.append(ToolCall(
+                    id=tc.get("id", "") or fn.get("name", ""),
+                    name=fn.get("name", ""),
+                    arguments=args,
+                ))
+            self._record_usage(model, data)
+            return ChatResult(
+                content=content, thinking=thinking, tool_calls=tool_calls,
+                finish_reason=data.get("done_reason", "stop"),
+                input_tokens=data.get("prompt_eval_count", 0),
+                output_tokens=data.get("eval_count", 0),
+                raw_message=msg,
+            )
+        except requests.HTTPError:
+            if think:
+                return self._chat_once_ollama(model, messages, temperature, tools, think=False)
+            raise
+
+    def _chat_once_openai(
+        self, model: str, messages: list[dict],
+        temperature: float, tools: list[dict] | None, think: bool,
+    ) -> ChatResult:
+        payload: dict = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "temperature": temperature,
+        }
+        if tools:
+            payload["tools"] = tools
+        resp = self._post("/v1/chat/completions", payload, stream=False)
+        resp.raise_for_status()
+        data = resp.json()
+        choice = data.get("choices", [{}])[0]
+        msg = choice.get("message", {})
+        content = msg.get("content", "") or ""
+        thinking = msg.get("reasoning_content", "") or msg.get("reasoning", "") or ""
+        if "<think>" in content:
+            t_extra, c_clean = "", ""
+            for kind, piece in _split_think(content):
+                if kind == "thinking":
+                    t_extra += piece
+                else:
+                    c_clean += piece
+            thinking += t_extra
+            content = c_clean
+        tool_calls = []
+        for tc in msg.get("tool_calls", []) or []:
+            fn = tc.get("function", {})
+            raw_args = fn.get("arguments", "") or ""
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except json.JSONDecodeError:
+                args = {}
+            tool_calls.append(ToolCall(
+                id=tc.get("id", ""),
+                name=fn.get("name", ""),
+                arguments=args or {},
+                raw_arguments=raw_args if isinstance(raw_args, str) else json.dumps(raw_args),
+            ))
+        usage = data.get("usage", {})
+        if self._usage_store and usage:
+            self._usage_store.record(UsageRecord(
+                provider=self.provider.label or self.provider.type,
+                model=model,
+                input_tokens=usage.get("prompt_tokens", 0),
+                output_tokens=usage.get("completion_tokens", 0),
+                finish_reason=choice.get("finish_reason", "stop"),
+            ))
+        return ChatResult(
+            content=content, thinking=thinking, tool_calls=tool_calls,
+            finish_reason=choice.get("finish_reason", "stop"),
+            input_tokens=usage.get("prompt_tokens", 0),
+            output_tokens=usage.get("completion_tokens", 0),
+            raw_message=msg,
+        )
+
+    def _record_usage(self, model: str, data: dict):
+        """从 Ollama 响应记录用量"""
+        if not self._usage_store:
+            return
+        self._usage_store.record(UsageRecord(
+            provider=self.provider.label or self.provider.type,
+            model=model,
+            input_tokens=data.get("prompt_eval_count", 0),
+            output_tokens=data.get("eval_count", 0),
+            finish_reason=data.get("done_reason", "stop"),
+        ))
 
     # ---- 纯提示生成 ----
 
