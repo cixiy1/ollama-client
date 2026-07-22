@@ -1,14 +1,47 @@
-"""Yuki Code — AI 模型调用层，支持多 Provider"""
+"""Yuki Code — AI 模型调用层，支持多 Provider，统一事件类型"""
 from __future__ import annotations
 
 import json
-import re
+import time
 import requests
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterator
 
 from .config import Provider
+from .session import SessionStore, Message as SessionMessage
+from .usage import UsageStore, UsageRecord
 
+
+# ---- 统一事件类型（参考 OpenCode ProviderEvent） ----
+
+class Event:
+    """统一流式事件类型 — 不管底层 Provider，上层收到的事件格式一致"""
+    THINKING_DELTA  = "thinking_delta"
+    THINKING_START  = "thinking_start"
+    THINKING_END    = "thinking_end"
+    CONTENT_DELTA   = "content_delta"
+    CONTENT_START   = "content_start"
+    CONTENT_END    = "content_end"
+    TOOL_CALL_START = "tool_call_start"
+    TOOL_CALL_DELTA = "tool_call_delta"
+    TOOL_CALL_END   = "tool_call_end"
+    USAGE           = "usage"
+    COMPLETE        = "complete"
+    ERROR           = "error"
+
+
+@dataclass
+class StreamEvent:
+    """流式事件封装"""
+    type: str = ""
+    content: str = ""
+    finish_reason: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    model: str = ""
+
+
+# ---- 数据模型 ----
 
 @dataclass
 class Model:
@@ -16,12 +49,27 @@ class Model:
     size: int = 0
     modified: str = ""
     digest: str = ""
+    context_length: int = 0
+
+    def format_size(self) -> str:
+        s = self.size
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if s < 1024:
+                return f"{s:.1f} {unit}"
+            s /= 1024
+        return f"{s:.1f} PB"
+
+    def format_modified(self) -> str:
+        return self.modified[:19].replace("T", " ") if self.modified else "未知"
 
 
-# ---- 思考标签拆分（deepseek 等内嵌思考的模型） ----
+# ---- 思考标签解析 ----
 
 def _split_think(text: str) -> Iterator[tuple[str, str]]:
-    """将包含 <think>/</think> 标签的文本拆成 (类型, 片段) 序列。"""
+    """
+    将包含<think>...</think>标签的文本拆成 (类型, 片段) 序列。
+    类型为 "thinking" 或 "content"。
+    """
     while text:
         o = text.find("<think>")
         c = text.find("</think>")
@@ -50,9 +98,15 @@ class YukiAPI:
     - ollama:  原生 Ollama HTTP API
     - openai:  OpenAI 兼容端点 (/v1/chat/completions)
     - custom:  自定义 URL + 自定义端点前缀
+
+    可选注入 SessionStore / UsageStore 以启用：
+    - 对话历史持久化
+    - Token 用量统计
     """
 
-    def __init__(self, provider: Provider):
+    def __init__(self, provider: Provider,
+                 session_store: SessionStore | None = None,
+                 usage_store: UsageStore | None = None):
         self.provider = provider
         self._session = requests.Session()
         self._session.headers.update({"Content-Type": "application/json"})
@@ -60,10 +114,13 @@ class YukiAPI:
             self._session.headers["Authorization"] = f"Bearer {provider.api_key}"
         if provider.extra_headers:
             self._session.headers.update(provider.extra_headers)
+        self._session_store = session_store
+        self._usage_store = usage_store
 
     # ---- 通用请求封装 ----
 
-    def _post(self, path: str, payload: dict, stream: bool = False, timeout: int | None = None) -> requests.Response:
+    def _post(self, path: str, payload: dict,
+              stream: bool = False, timeout: int | None = None) -> requests.Response:
         url = f"{self.provider.base_url.rstrip('/')}{path}"
         t = timeout if timeout is not None else self.provider.timeout
         return self._session.post(url, json=payload, stream=stream, timeout=t)
@@ -73,7 +130,8 @@ class YukiAPI:
         t = timeout if timeout is not None else self.provider.timeout
         return self._session.get(url, timeout=t)
 
-    def _delete(self, path: str, payload: dict, timeout: int | None = None) -> requests.Response:
+    def _delete(self, path: str, payload: dict,
+                timeout: int | None = None) -> requests.Response:
         url = f"{self.provider.base_url.rstrip('/')}{path}"
         t = timeout if timeout is not None else self.provider.timeout
         return self._session.delete(url, json=payload, timeout=t)
@@ -81,7 +139,6 @@ class YukiAPI:
     # ---- 服务检测 ----
 
     def ping(self) -> bool:
-        """检查服务是否在线"""
         try:
             r = self._get("/", timeout=5)
             return r.status_code == 200
@@ -91,13 +148,11 @@ class YukiAPI:
     # ---- 模型列表 ----
 
     def list_models(self) -> list[Model]:
-        """列出可用模型"""
         if self.provider.type == "ollama":
             return self._list_models_ollama()
-        elif self.provider.type == "openai":
+        elif self.provider.type in ("openai", "custom"):
             return self._list_models_openai()
-        else:
-            return self._list_models_openai()  # custom 默认为 OpenAI 格式
+        return []
 
     def _list_models_ollama(self) -> list[Model]:
         r = self._get("/api/tags", timeout=10)
@@ -110,22 +165,19 @@ class YukiAPI:
         ]
 
     def _list_models_openai(self) -> list[Model]:
-        """OpenAI 兼容列表，优先 /v1/models，失败则用 default_model 模拟"""
         try:
             r = self._get("/v1/models", timeout=10)
             r.raise_for_status()
             data = r.json()
             return [Model(name=m["id"]) for m in data.get("data", [])]
         except requests.RequestException:
-            # 无模型列表时用 default_model 模拟一条
             if self.provider.default_model:
                 return [Model(name=self.provider.default_model)]
             return []
 
-    # ---- 模型操作（仅 Ollama 支持） ----
+    # ---- 模型操作（仅 Ollama） ----
 
     def pull_model(self, name: str) -> Iterator[str]:
-        """拉取模型（流式，仅 Ollama）"""
         if self.provider.type != "ollama":
             yield f"[{name}] 当前 Provider 类型不支持拉取模型"
             return
@@ -145,10 +197,9 @@ class YukiAPI:
                         else:
                             yield status
         except requests.RequestException as e:
-            yield f"[red]拉取失败: {e}[/red]"
+            yield f"[拉取失败: {e}]"
 
     def delete_model(self, name: str) -> bool:
-        """删除模型（仅 Ollama）"""
         if self.provider.type != "ollama":
             return False
         try:
@@ -158,7 +209,6 @@ class YukiAPI:
             return False
 
     def show_model_info(self, name: str) -> dict:
-        """查看模型详情（仅 Ollama）"""
         if self.provider.type != "ollama":
             return {"error": "当前 Provider 类型不支持查看模型详情"}
         try:
@@ -169,7 +219,6 @@ class YukiAPI:
             return {"error": str(e)}
 
     def running_models(self) -> list[dict]:
-        """查看当前加载的模型（仅 Ollama）"""
         if self.provider.type != "ollama":
             return []
         try:
@@ -179,7 +228,7 @@ class YukiAPI:
         except requests.RequestException:
             return []
 
-    # ---- 对话生成 ----
+    # ---- 对话生成（传统 tuple 接口，兼容旧代码） ----
 
     def chat(
         self,
@@ -189,10 +238,6 @@ class YukiAPI:
         stream: bool = True,
         think: bool = True,
     ) -> Iterator[tuple[str, str]]:
-        """
-        对话生成（流式），返回 (类型, 内容) 元组。
-        类型为 "thinking" 或 "content"。
-        """
         if self.provider.type == "ollama":
             yield from self._chat_ollama(model, messages, temperature, stream, think)
         else:
@@ -237,7 +282,6 @@ class YukiAPI:
         self, model: str, messages: list[dict],
         temperature: float, stream: bool, think: bool,
     ) -> Iterator[tuple[str, str]]:
-        """OpenAI 兼容 /v1/chat/completions"""
         payload = {
             "model": model,
             "messages": messages,
@@ -250,9 +294,9 @@ class YukiAPI:
                 if stream:
                     for line in resp.iter_lines():
                         if line:
-                            line = line.decode("utf-8", errors="replace")
-                            if line.startswith("data: "):
-                                data_str = line[6:]
+                            line_text = line.decode("utf-8", errors="replace")
+                            if line_text.startswith("data: "):
+                                data_str = line_text[6:]
                                 if data_str.strip() == "[DONE]":
                                     return
                                 try:
@@ -264,7 +308,6 @@ class YukiAPI:
                                 if content:
                                     for kind, piece in _split_think(content):
                                         yield (kind, piece)
-                                # OpenAI 格式无独立 thinking 字段
                 else:
                     data = resp.json()
                     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -273,6 +316,64 @@ class YukiAPI:
                             yield (kind, piece)
         except requests.RequestException as e:
             yield ("content", f"[请求错误: {e}]")
+
+    # ---- 统一事件流接口（参考 OpenCode StreamResponse） ----
+
+    def stream_events(
+        self,
+        model: str,
+        messages: list[dict],
+        temperature: float = 0.7,
+        think: bool = True,
+    ) -> Iterator[StreamEvent]:
+        """
+        统一事件流接口，yield StreamEvent。
+        对应 OpenCode 的 Provider.StreamResponse。
+
+        上层 UI 只需处理 Event 常量，不需关心底层 Provider 类型。
+        """
+        start_time = time.time()
+        thinking_buf = ""
+        content_buf = ""
+        think_started = False
+
+        for kind, piece in self.chat(model, messages, temperature,
+                                     stream=True, think=think):
+            if kind == "thinking":
+                if not think_started:
+                    think_started = True
+                    yield StreamEvent(type=Event.THINKING_START)
+                thinking_buf += piece
+                yield StreamEvent(type=Event.THINKING_DELTA, content=piece)
+            else:
+                if think_started and content_buf == "":
+                    yield StreamEvent(type=Event.THINKING_END)
+                    think_started = False
+                content_buf += piece
+                yield StreamEvent(type=Event.CONTENT_DELTA, content=piece)
+
+        if think_started:
+            yield StreamEvent(type=Event.THINKING_END)
+        yield StreamEvent(type=Event.CONTENT_END)
+
+        # 记录用量
+        latency_ms = int((time.time() - start_time) * 1000)
+        if self._usage_store:
+            record = UsageRecord(
+                provider=self.provider.label or self.provider.type,
+                model=model,
+                input_tokens=0,       # Ollama 不返回精确统计，放 0
+                output_tokens=0,
+                latency_ms=latency_ms,
+                finish_reason="stop",
+            )
+            self._usage_store.record(record)
+
+        yield StreamEvent(
+            type=Event.COMPLETE,
+            model=model,
+            finish_reason="stop",
+        )
 
     # ---- 纯提示生成 ----
 
@@ -284,11 +385,9 @@ class YukiAPI:
         stream: bool = True,
         think: bool = True,
     ) -> Iterator[tuple[str, str]]:
-        """纯提示生成（流式）"""
         if self.provider.type == "ollama":
             yield from self._generate_ollama(model, prompt, temperature, stream, think)
         else:
-            # OpenAI 格式没有 /generate，用 chat 单轮模拟
             messages = [{"role": "user", "content": prompt}]
             yield from self._chat_openai(model, messages, temperature, stream, think)
 
@@ -329,7 +428,6 @@ class YukiAPI:
     # ---- 工具函数 ----
 
     def format_size(self, bytes_size: int) -> str:
-        """字节大小转可读字符串"""
         for unit in ["B", "KB", "MB", "GB", "TB"]:
             if bytes_size < 1024:
                 return f"{bytes_size:.1f} {unit}"
