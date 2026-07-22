@@ -381,6 +381,19 @@ def cmd_chat(api: YukiAPI, model: str, system: str | None, temp: float,
         if user_input in ("/quit", "/exit", "quit", "exit"):
             console.print("[dim]退出对话[/]")
             break
+        if user_input in ("/help", "/?", "?"):
+            console.print(Panel(
+                "[cyan]/clear[/]     清除对话历史（保留系统提示）\n"
+                "[cyan]/models[/]    列出可用模型\n"
+                "[cyan]/tools[/]     列出所有工具\n"
+                "[cyan]/tool N P[/]  手动执行工具（N=名称 P=JSON 参数）\n"
+                "[cyan]/sessions[/]  列出历史会话\n"
+                "[cyan]/usage[/]     查看 Token 用量\n"
+                "[cyan]/contexts[/]  查看当前上下文文件\n"
+                "[cyan]/quit[/]      退出",
+                title="[bold]对话指令[/]", border_style="cyan",
+                box=box.ROUNDED, expand=False, padding=(0, 2)))
+            continue
         if user_input == "/clear":
             messages = [m for m in messages if m.get("role") == "system"]
             console.print("[dim]对话历史已清除[/]")
@@ -546,7 +559,7 @@ def cmd_agent(api: YukiAPI, model: str, system: str | None, temp: float,
     console.print(Rule(f"[bold magenta][agent] 智能代理[/]  [cyan]{model}[/]"
                        f"[dim]  会话 {session.id[:8]}[/]"))
     approve_hint = "[green]自动批准已开[/]" if auto_approve else "[dim]危险操作需确认[/]"
-    console.print(f"[dim]工具: {len(tools_schema)} 个  |  {approve_hint}  |  指令: /quit[/]\n")
+    console.print(f"[dim]工具: {len(tools_schema)} 个  |  {approve_hint}  |  指令: /help /tools /usage /clear /quit[/]\n")
 
     def run_one(user_input: str):
         nonlocal auto_approve
@@ -642,6 +655,23 @@ def cmd_agent(api: YukiAPI, model: str, system: str | None, temp: float,
             if user_input in ("/quit", "/exit", "quit", "exit"):
                 console.print("[dim]退出 agent[/]")
                 break
+            if user_input in ("/help", "/?", "?"):
+                console.print(Panel(
+                    "[magenta]直接输入任务[/]，模型会自主调用工具完成。\n\n"
+                    "[cyan]/tools[/]   列出可用工具\n"
+                    "[cyan]/usage[/]   查看 Token 用量\n"
+                    "[cyan]/clear[/]   清除对话历史\n"
+                    "[cyan]/quit[/]    退出\n\n"
+                    f"[dim]危险工具 {'/'.join(sorted(DANGEROUS_TOOLS))} 需确认（-y 可自动批准）[/]",
+                    title="[bold]Agent 指令[/]", border_style="magenta",
+                    box=box.ROUNDED, expand=False, padding=(0, 2)))
+                continue
+            if user_input == "/tools":
+                cmd_tools(_tool_registry)
+                continue
+            if user_input == "/usage":
+                cmd_usage_summary()
+                continue
             if user_input == "/clear":
                 messages = [m for m in messages if m.get("role") == "system"]
                 console.print("[dim]历史已清除[/]")
