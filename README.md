@@ -1,10 +1,8 @@
 # Yuki Code
 
-本地 AI 代码助手（Vibe Coding 工具），支持调用本地 Ollama 模型进行代码补全、对话和推理。
+本地 AI 代码助手，支持调用本地 Ollama 模型进行代码生成、对话和推理。
 
-基于 [`rich`](https://pypi.org/project/rich/) 实现，无重型依赖，连接任意兼容 Ollama API 的本地模型。与**命令行（CLI）**两种使用方式，也可作为 Python 库直接调用。
-
-基于 [`requests`](https://pypi.org/project/requests/) 与 [`rich`](https://pypi.org/project/rich/) 实现，无重型依赖。
+基于 [`rich`](https://pypi.org/project/rich/) 与 [`requests`](https://pypi.org/project/requests/) 实现，无重型依赖，连接任意兼容 Ollama API 的本地模型，支持交互式终端界面、命令行（CLI）两种使用方式，也可作为 Python 库直接调用。
 
 ---
 
