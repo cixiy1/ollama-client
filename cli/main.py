@@ -26,6 +26,22 @@ from .tools import ToolRegistry
 from .usage import UsageStore
 from .plan import cmd_plan
 
+# 新增模块导入
+from .config_manager import ConfigManager
+from .theme import ThemeManager, Theme
+from .shortcuts import KeyboardManager, KeyboardShortcut
+from .autocomplete import CompletionEngine
+from .multi_agent import AgentOrchestrator, Agent, AgentRole
+from .agent_communication import CommunicationSystem
+from .menu_extensions import (
+    config_menu, theme_menu, shortcuts_menu, agent_menu,
+    show_current_config, export_config, import_config, reset_config,
+    show_config_file, fix_config, show_current_theme, switch_theme,
+    list_themes, customize_theme, export_theme, show_shortcuts,
+    edit_shortcuts, reset_shortcuts, export_shortcuts, test_shortcuts,
+    list_agents, create_agent, start_agent, stop_agent, delete_agent,
+    agent_status, agent_logs)
+
 console = Console()
 
 
@@ -34,6 +50,14 @@ console = Console()
 _session_store = SessionStore()
 _usage_store = UsageStore()
 _tool_registry = ToolRegistry()
+
+# 新增全局实例
+_config_manager = ConfigManager()
+_theme_manager = ThemeManager()
+_keyboard_manager = KeyboardManager()
+_completion_engine = CompletionEngine()
+_agent_orchestrator = AgentOrchestrator()
+_communication_system = CommunicationSystem()
 
 
 # ---- 思考标签清理 ----
@@ -1190,6 +1214,10 @@ def cfg_menu(api: YukiAPI, cfg):
         "  [bold yellow]c[/]  重命名 Provider\n"
         "  [bold yellow]d[/]  删除 Provider\n"
         "  [bold yellow]e[/]  查看用量统计\n"
+        "  [bold yellow]f[/]  配置管理\n"
+        "  [bold yellow]g[/]  主题设置\n"
+        "  [bold yellow]h[/]  快捷键设置\n"
+        "  [bold yellow]i[/]  多 Agent 管理\n"
         "  [bold yellow]0[/]  返回"
     )
     while True:
@@ -1227,6 +1255,16 @@ def cfg_menu(api: YukiAPI, cfg):
                 cmd_config_remove(name)
         elif choice == "e":
             cmd_usage_summary()
+        elif choice == "f":
+            config_menu()
+        elif choice == "g":
+            theme_menu()
+        elif choice == "h":
+            shortcuts_menu()
+        elif choice == "i":
+            agent_menu()
+        else:
+            console.print("[yellow]无效选择，请输入 0-9[/]")
 
 
 # ---- 主入口 ----
