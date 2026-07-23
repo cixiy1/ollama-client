@@ -38,6 +38,20 @@ _tool_registry = ToolRegistry()
 
 # ---- 思考标签清理 ----
 
+import re as _re
+
+
+def _estimate_tokens(text: str) -> int:
+    """粗略估算 token 数量（仅用于流式显示）"""
+    if not text:
+        return 0
+    chinese = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    english_words = len(_re.findall(r'[a-zA-Z]+', text))
+    other = len(text) - chinese - sum(len(w) for w in _re.findall(r'[a-zA-Z]+', text))
+    tokens = int(chinese * 0.5 + english_words + other * 0.1)
+    return max(1, tokens)
+
+
 def _strip_think_tags(text: str) -> str:
     """去掉文本中所有<think>...</think> 标签"""
     while True:
@@ -54,7 +68,16 @@ def _strip_think_tags(text: str) -> str:
 
 # ---- 流式渲染 ----
 
-def _build_window(thinking_text: str, answer_text: str, thinking_done: bool) -> Group:
+def _build_window(thinking_text: str, answer_text: str, thinking_done: bool,
+                token_stats: dict | None = None) -> Group:
+    """
+    token_stats: {
+        'input_tokens': int,
+        'output_tokens': int,
+        'tokens_per_sec': float,
+        'elapsed': float
+    }
+    """
     cards = []
     if thinking_text.strip():
         status = "[dim italic]思考中..." if not thinking_done else "[dim]完成[/]"
@@ -70,8 +93,13 @@ def _build_window(thinking_text: str, answer_text: str, thinking_done: bool) -> 
     if answer_text.strip():
         answer_text = _strip_think_tags(answer_text)
         body = Text(answer_text, style="white", overflow="fold", no_wrap=False)
+        title_text = "[bold green] 回答[/]"
+        if token_stats:
+            tps = token_stats['tokens_per_sec']
+            ot = token_stats['output_tokens']
+            title_text += f" [dim]|[/] [cyan]{ot} tok[/] [dim]|[/] [cyan]{tps:.1f} tok/s[/]"
         cards.append(Panel(body,
-            title="[bold green] 回答[/]",
+            title=title_text,
             title_align="left",
             border_style="green",
             box=box.ROUNDED,
@@ -96,8 +124,19 @@ def _stream_and_render(stream, title: str = "") -> str:
         border_style="bright_blue", box=box.DOUBLE, padding=(0, 1), expand=True)
         if title else None)
 
+    # Token 统计
+    start_time = time.time()
+    output_tokens = 0
+
     def render():
-        grp = _build_window(thinking_buf, answer_buf, thinking_done)
+        elapsed = time.time() - start_time
+        tps = output_tokens / elapsed if elapsed > 0 else 0.0
+        token_stats = {
+            'output_tokens': output_tokens,
+            'tokens_per_sec': tps,
+            'elapsed': elapsed,
+        }
+        grp = _build_window(thinking_buf, answer_buf, thinking_done, token_stats)
         return Group(header, grp) if header else grp
 
     with Live(render(), console=console, refresh_per_second=12, transient=False) as live:
