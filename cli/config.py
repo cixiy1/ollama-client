@@ -65,6 +65,13 @@ class Config:
     providers: dict[str, Provider] = field(default_factory=dict)
     # 全局设置
     context_dir: str = ""  # 上下文文件搜索目录
+    
+    @property
+    def default_provider(self) -> Provider | None:
+        """获取当前选中的 Provider"""
+        if self.current and self.current in self.providers:
+            return self.providers[self.current]
+        return None
 
     def to_dict(self) -> dict:
         return {

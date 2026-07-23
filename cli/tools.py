@@ -739,6 +739,10 @@ class ToolRegistry:
 
     def list(self) -> list[BaseTool]:
         return list(self._tools.values())
+    
+    def list_tools(self) -> list[BaseTool]:
+        """获取工具列表（向后兼容）"""
+        return self.list()
 
     def tool_infos(self) -> list[ToolInfo]:
         return [t.info() for t in self._tools.values()]
