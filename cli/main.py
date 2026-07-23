@@ -389,6 +389,20 @@ def cmd_chat(api: YukiAPI, model: str, system: str | None, temp: float,
         session = _session_store.get_session(session_id)
         if session:
             messages = [{"role": m.role, "content": m.content} for m in session.messages]
+            # 显示历史消息摘要
+            non_system = [m for m in session.messages if m.role != "system"]
+            if non_system:
+                console.print(f"\n[bold cyan]📜 会话历史[/]  [dim]{len(non_system)} 条消息[/]")
+                last_show = non_system[-6:]  # 最多显示最后 6 条
+                for m in last_show:
+                    role_tag = "[cyan]You[/]" if m.role == "user" else ("[green]AI[/]" if m.role == "assistant" else f"[dim]{m.role}[/]")
+                    preview = m.content.replace("\n", " ")[:80]
+                    if len(m.content) > 80:
+                        preview += "..."
+                    console.print(f"  {role_tag} [dim]{preview}[/]")
+                if len(non_system) > len(last_show):
+                    console.print(f"  [dim]... 还有 {len(non_system) - len(last_show)} 条更早的消息[/]")
+                console.print()
         else:
             console.print(f"[yellow]会话 {session_id} 不存在，创建新会话[/]")
             session = _session_store.create_session(
