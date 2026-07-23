@@ -631,6 +631,91 @@ class LsTool(BaseTool):
             return ToolResponse(content=str(e), is_error=True)
 
 
+# ---- Git 工具 ----
+
+class GitTool(BaseTool):
+    """Git 操作工具：status / diff / log / branch / checkout / commit"""
+
+    def info(self) -> ToolInfo:
+        desc = (
+            "执行 Git 操作。子命令：" +
+            "status [path]    - 当前状态（默认当前目录）" +
+            "diff [path]      - 查看未暂存的变更" +
+            "diff --cached    - 查看已暂存的变更" +
+            "log [-n N]       - 最近 N 条提交记录（默认 5）" +
+            "branch           - 列出所有分支" +
+            "branch -r        - 列出远程分支" +
+            "checkout <branch> - 切换分支" +
+            "add <path>       - 暂存文件（path 为空则全暂存）" +
+            "commit -m <msg>  - 提交，消息必需" +
+            "push             - 推送到远程" +
+            "pull             - 从远程拉取" +
+            "示例: git status / git diff src/main.py / git commit -m fix:bug"
+        )
+        cmd_desc = (
+            "Git 子命令，如 status, diff, log, branch, checkout, add, commit, push, pull。"
+            "格式：子命令 [参数...]，如 diff --cached 或 log -n 10。"
+        )
+        return ToolInfo(
+            name="git",
+            description=desc,
+            parameters={
+                "command": {
+                    "type": "string",
+                    "description": cmd_desc,
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "执行 git 命令的目录，默认为当前工作目录",
+                },
+            },
+            required=["command"],
+        )
+
+    def run(self, params: dict,
+            stream_cb: "callable[[str], None] | None" = None) -> ToolResponse:
+        cmd_str = self._param(params, "command", "status")
+        cwd = self._param(params, "cwd")
+
+        parts = cmd_str.strip().split()
+        if not parts:
+            return ToolResponse(content="git: 子命令不能为空", is_error=True)
+
+        git_cmd = ["git"] + parts
+
+        if "-m" in parts:
+            idx = parts.index("-m")
+            if idx + 1 < len(parts):
+                msg = parts[idx + 1]
+                git_cmd = ["git"] + parts[:idx] + ["-m", msg]
+
+        try:
+            result = subprocess.run(
+                git_cmd,
+                capture_output=True, text=True,
+                cwd=cwd or None,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            return ToolResponse(content="git: 命令执行超时（60s）", is_error=True)
+        except FileNotFoundError:
+            return ToolResponse(
+                content="git: 未找到 git 命令，请确认已安装 Git 并在 PATH 中",
+                is_error=True,
+            )
+
+        out = result.stdout
+        err = result.stderr
+
+        if result.returncode != 0 and err:
+            out = (out + "\n" + err).strip() if out else err.strip()
+            return ToolResponse(content=out, is_error=True)
+
+        if stream_cb and out:
+            stream_cb(out)
+
+        return ToolResponse(content=out or "(无输出)")
+
 # ---- 工具注册表 ----
 
 class ToolRegistry:
@@ -643,7 +728,7 @@ class ToolRegistry:
         self._tools: dict[str, BaseTool] = {}
         # 默认注册内置工具
         for cls in (GlobTool, GrepTool, ReadTool, WriteTool,
-                    EditTool, BashTool, LsTool):
+                    EditTool, BashTool, LsTool, GitTool):
             self.register(cls())
 
     def register(self, tool: BaseTool):
