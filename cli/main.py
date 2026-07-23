@@ -32,6 +32,7 @@ from cli.context import (
 from cli.tools import ToolRegistry
 from cli.usage import UsageStore
 from cli.plan import cmd_plan
+from cli.compress import ContextCompressor, CompressConfig
 
 # 新增模块导入
 from cli.config_manager import ConfigManager
@@ -478,7 +479,10 @@ def cmd_chat(api: YukiAPI, model: str, system: str | None, temp: float,
                 "[cyan]/plan[/]      Plan Mode（只读分析，生成执行计划）\n"
                 "[cyan]/retry[/]     重试上一次对话\n"
                 "[cyan]/undo[/]      撤销最后一轮对话\n"
-                "[cyan]/compact[/]   紧凑对话历史（保留最近 3 条）\n"
+                "[cyan]/compact[/]   紧凑对话历史（/compact 5, /compact --llm）\n"
+                "[cyan]/compress[/]  查看上下文分析\n"
+                "[cyan]/ctx[/]      同上\n"
+                "[cyan]/prune[/]     修剪过长工具输出\n"
                 "[cyan]/quit[/]      退出",
                 title="[bold]对话指令[/]", border_style="cyan",
                 box=box.ROUNDED, expand=False, padding=(0, 2)))
@@ -556,13 +560,73 @@ def cmd_chat(api: YukiAPI, model: str, system: str | None, temp: float,
             else:
                 console.print("[yellow]没有可撤销的对话历史[/]")
             continue
-        if user_input == "/compact":
-            deleted = _session_store.compact_messages(session.id, keep_last=3)
+        if user_input == "/compress" or user_input == "/ctx":
+            comp = ContextCompressor()
+            analysis = comp.analyze(
+                [Message(role=m.get("role",""), content=m.get("content","")) for m in messages],
+                model_hint=model,
+            )
+            console.print(Panel(
+                f"[cyan]消息总数:[/] {analysis['total_messages']}\n"
+                f"[cyan]估算 Tokens:[/] {analysis['estimated_tokens']}\n"
+                f"[cyan]角色分布:[/] U:{analysis['by_role']['user']} A:{analysis['by_role']['assistant']} "
+                f"T:{analysis['by_role']['tool']} S:{analysis['by_role']['system']}\n"
+                f"[cyan]工具配对数:[/] {analysis['tool_pairs']}\n"
+                f"[cyan]上下文占用:[/] {analysis['usage_pct']}%\n"
+                f"[cyan]需压缩:[/] {'[bold yellow]是' if analysis['need_compact'] else '[green]否'}[/]",
+                title="[bold]上下文分析[/]", border_style="cyan",
+            ))
+            continue
+        if user_input == "/prune":
+            comp = ContextCompressor()
+            msgs_obj = [Message(role=m.get("role",""), content=m.get("content","")) for m in messages]
+            pruned = comp.prune_tool_results(msgs_obj, max_content_chars=500)
+            # 只保留最后一个 tool 消息做摘要展示
+            pruned_count = sum(1 for m in msgs_obj if m.role == "tool" and len(m.content) > 500)
+            # 在内存中替换 messages 的 tool content
+            old_tools = [m for m in messages if m.get("role") == "tool"]
+            for i, m in enumerate(messages):
+                if m.get("role") == "tool" and len(m.get("content","")) > 500:
+                    m["content"] = m["content"][:500] + f"\n... [截断，原文 {len(m['content'])} 字符]"
+            console.print(f"[dim]已修剪 {pruned_count} 个过长工具输出[/]")
+            continue
+        if user_input == "/compact" or user_input.startswith("/compact "):
+            # 解析参数：/compact [keep_count] [--llm]
+            keep = 3
+            use_llm = False
+            parts = user_input.split()
+            if len(parts) >= 2:
+                arg = parts[1]
+                if arg == "--llm":
+                    use_llm = True
+                else:
+                    try:
+                        keep = int(arg)
+                        if len(parts) >= 3 and parts[2] == "--llm":
+                            use_llm = True
+                    except ValueError:
+                        pass
+            comp = ContextCompressor(CompressConfig(
+                manual_compact_keep_recent=keep,
+                summarization_model=model if use_llm else None,
+            ))
+            deleted = _session_store.compact_messages(
+                session.id, keep_last=keep, compressor=comp,
+            )
             if deleted > 0:
                 messages = [m for m in messages if m.get("role") == "system"]
                 session = _session_store.get_session(session.id)
                 messages = [{"role": m.role, "content": m.content} for m in session.messages]
-                console.print(f"[dim]已紧凑对话历史，删除 {deleted} 条旧消息[/]")
+                summary_line = ""
+                for m in messages:
+                    if m.get("role") == "system" and "上下文压缩摘要" in (m.get("content") or ""):
+                        summary_line = m["content"][:200].replace("\n", " ")
+                        break
+                if summary_line:
+                    console.print(f"[dim]已紧凑对话历史，删除 {deleted} 条旧消息[/]")
+                    console.print(f"[dim]摘要: {summary_line}...[/]")
+                else:
+                    console.print(f"[dim]已紧凑对话历史，删除 {deleted} 条旧消息[/]")
             else:
                 console.print("[yellow]没有需要紧凑的消息[/]")
             continue
@@ -593,6 +657,25 @@ def cmd_chat(api: YukiAPI, model: str, system: str | None, temp: float,
         # 自动生成标题（第一条用户消息作为标题）
         if session.title == "新对话":
             _session_store.auto_title(session.id)
+
+        # 自动压缩：消息数超过阈值时静默压缩
+        try:
+            session_check = _session_store.get_session(session.id)
+            if session_check and len(session_check.messages) > 25:
+                old_count = len(session_check.messages)
+                _compressor = ContextCompressor()
+                deleted = _session_store.compact_messages(
+                    session.id,
+                    keep_last=_compressor.config.auto_compact_keep_recent,
+                    compressor=_compressor,
+                )
+                if deleted > 0:
+                    messages = [m for m in messages if m.get("role") == "system"]
+                    session = _session_store.get_session(session.id)
+                    messages = [{"role": m.role, "content": m.content} for m in session.messages]
+                    console.print(f"[dim]自动压缩完成，{old_count} → {len(messages)} 条消息[/]")
+        except Exception:
+            pass
 
         console.print()
 
