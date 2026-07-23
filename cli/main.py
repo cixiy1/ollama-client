@@ -24,6 +24,7 @@ from .context import (
     inject_into_messages, load_context_for_directory)
 from .tools import ToolRegistry
 from .usage import UsageStore
+from .plan import cmd_plan
 
 console = Console()
 
@@ -956,6 +957,7 @@ def interactive(args):
 
     menu = (
         "  [bold magenta]a[/]  [agent] 智能代理（可调工具写代码）\n"
+        "  [bold yellow]p[/]  [plan]  计划模式（只读分析再执行）\n"
         "  [bold yellow]1[/]  [chat]  与模型对话\n"
         "  [bold yellow]2[/]  [hist] 恢复历史会话\n"
         "  [bold yellow]3[/]  [list]  列出所有可用模型\n"
@@ -986,6 +988,15 @@ def interactive(args):
             model = _pick_model(api, "选择 agent 模型（建议支持 tools 的，如 qwen2.5-coder）")
             if model:
                 cmd_agent(api, model, None, 0.3, cwd=work_dir)
+        elif choice == "p":
+            model = _pick_model(api, "选择模型（建议用强推理模型）")
+            if model:
+                task = console.input("[cyan]输入任务描述:[/] ").strip()
+                if task:
+                    confirmed = cmd_plan(api, model, task, work_dir)
+                    if confirmed:
+                        cmd_agent(api, model, None, 0.3,
+                                  auto_approve=False, cwd=work_dir)
         elif choice == "1":
             model = _pick_model(api, "选择对话模型")
             if model:
@@ -1195,6 +1206,13 @@ Provider 管理:
     chat_p.add_argument("--session", dest="session_id", help="指定会话 ID 恢复")
     chat_p.add_argument("--cwd", dest="cwd", help="工作目录（用于上下文感知）")
 
+    # plan
+    plan_p = sub.add_parser("plan", help="计划模式（只读分析，生成执行计划后再动手）")
+    plan_p.add_argument("model", help="模型名称")
+    plan_p.add_argument("--prompt", "-p", dest="task", required=True,
+                        help="要分析的任务描述")
+    plan_p.add_argument("--cwd", dest="cwd", help="工作目录")
+
     # agent
     agent_p = sub.add_parser("agent", help="智能代理模式（模型可自主调用工具）")
     agent_p.add_argument("model", help="模型名称（建议支持 function calling 的）")
@@ -1304,6 +1322,11 @@ Provider 管理:
         case "chat":
             cmd_chat(api, args.model, args.system, args.temp,
                     args.stdin, args.session_id, work_dir)
+        case "plan":
+            confirmed = cmd_plan(api, args.model, args.task, work_dir)
+            if confirmed:
+                cmd_agent(api, args.model, None, 0.3,
+                          auto_approve=False, cwd=work_dir)
         case "agent":
             cmd_agent(api, args.model, args.system, args.temp,
                       auto_approve=args.auto_approve,
