@@ -371,7 +371,7 @@ class SessionStore:
             conn.execute(
                 "INSERT INTO messages (id,session_id,role,content,thinking,model,timestamp) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (str(uuid.uuid4())[:12], session_id, "system", summary, "", model, time.time()),
+                (str(uuid.uuid4())[:12], session_id, "system", summary, "", "", time.time()),
             )
             conn.execute(
                 "UPDATE sessions SET updated_at=? WHERE id=?",
