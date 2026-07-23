@@ -500,6 +500,23 @@ def _assistant_toolcall_message(provider_type: str, result) -> dict:
     }
 
 
+def _stream_tool_output(prefix: str, text: str,
+                       is_error: bool = False) -> None:
+    """流式打印工具输出（实时显示执行进度）"""
+    import sys, time
+    style = "[red]" if is_error else "[dim]"
+    end = "[\033[0m]\n"
+    chunk_size = max(1, len(text) // 30)  # 分 30 段
+    for i in range(0, len(text), chunk_size):
+        chunk = text[i:i + chunk_size]
+        sys.stdout.write(f"\r{style}{prefix}: {chunk}{end}")
+        sys.stdout.flush()
+        if i + chunk_size < len(text):
+            time.sleep(0.008)  # ~120 chars/s，最大不超过 2.5s
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
 def _render_tool_call(tc, index: int):
     """展示一个工具调用"""
     args_preview = json.dumps(tc.arguments, ensure_ascii=False)
@@ -623,13 +640,28 @@ def cmd_agent(api: YukiAPI, model: str, system: str | None, temp: float,
                             role="tool", content="[用户拒绝]", model=model))
                         console.print("[dim]已跳过[/]")
                         continue
-                tool_res = _tool_registry.execute(tc.name, tc.arguments)
+                # 流式回调：实时打印工具输出
+                buf = []
+                def stream_cb(chunk: str):
+                    buf.append(chunk)
+                    _stream_tool_output(f"\u00bb {tc.name}", chunk,
+                                       is_error=False)
+
+                tool_res = _tool_registry.execute(tc.name, tc.arguments,
+                                                  stream_cb=stream_cb)
                 out = tool_res.to_text()
+                # 如果还有未流式输出的部分（短输出或非 bash 工具）
+                if buf:
+                    full_buf = "".join(buf)
+                    if not out.startswith(full_buf):
+                        remaining = out[len(full_buf):]
+                        if remaining:
+                            console.print(f"[dim]{remaining}[/]")
                 preview = out if len(out) <= 1500 else out[:1500] + "\n…(截断)"
                 console.print(Panel(
                     Text(preview, style="dim" if not tool_res.is_error else "red",
                          overflow="fold"),
-                    title=f"[{'red' if tool_res.is_error else 'green'}]↳ 结果[/]",
+                    title=f"[{'red' if tool_res.is_error else 'green'}]\u251c\u2500 结果[/]",
                     border_style="red" if tool_res.is_error else "green",
                     box=box.ROUNDED, padding=(0, 2), expand=False))
                 messages.append(_tool_result_message(api.provider.type, tc, out))

@@ -82,7 +82,7 @@ class GlobTool(BaseTool):
             required=["pattern"],
         )
 
-    def run(self, params: dict) -> ToolResponse:
+    def run(self, params: dict, stream_cb: "Callable[[str], None] | None" = None) -> ToolResponse:
         import glob as _glob
         pattern = self._param(params, "pattern", "")
         root = self._param(params, "path", ".")
@@ -139,7 +139,7 @@ class GrepTool(BaseTool):
                    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".db",
                    ".sqlite", ".woff", ".woff2", ".ttf", ".mp4", ".mp3"}
 
-    def run(self, params: dict) -> ToolResponse:
+    def run(self, params: dict, stream_cb: "Callable[[str], None] | None" = None) -> ToolResponse:
         import fnmatch
         pattern = self._param(params, "pattern", "")
         path = self._param(params, "path", ".")
@@ -230,7 +230,7 @@ class ReadTool(BaseTool):
             required=["file_path"],
         )
 
-    def run(self, params: dict) -> ToolResponse:
+    def run(self, params: dict, stream_cb: "Callable[[str], None] | None" = None) -> ToolResponse:
         path = self._param(params, "file_path", "")
         offset = int(self._param(params, "offset", 1)) - 1  # 转 0-index
         limit = self._param(params, "limit", None)
@@ -278,7 +278,7 @@ class WriteTool(BaseTool):
             required=["file_path", "content"],
         )
 
-    def run(self, params: dict) -> ToolResponse:
+    def run(self, params: dict, stream_cb: "Callable[[str], None] | None" = None) -> ToolResponse:
         path = self._param(params, "file_path", "")
         content = self._param(params, "content", "")
 
@@ -293,53 +293,173 @@ class WriteTool(BaseTool):
             return ToolResponse(content=str(e), is_error=True)
 
 
+def _make_diff(old_text: str, new_text: str, file_path: str, line_hint: int = 1) -> str:
+    """生成简洁的 unified diff 预览（不超过 20 行）"""
+    MAX_LINES = 20
+    old_lines = old_text.rstrip("\n").split("\n")
+    new_lines = new_text.rstrip("\n").split("\n")
+    n_old = len(old_lines)
+    n_new = len(new_lines)
+    # 头部
+    header = f"--- {file_path} (原始，第 {line_hint} 行起)\n+++ {file_path} (修改后)"
+    # 简单行级 diff（逐行对比）
+    diff_lines = [header]
+    max_rows = max(n_old, n_new)
+    shown = 0
+    for i in range(max_rows):
+        if shown >= MAX_LINES:
+            diff_lines.append(f"        ... (共 {n_old}→{n_new} 行)")
+            break
+        lo = old_lines[i] if i < n_old else None
+        ln = new_lines[i] if i < n_new else None
+        if lo == ln:
+            diff_lines.append(f"  {lo}")
+        else:
+            if lo is not None:
+                diff_lines.append(f"- {lo}")
+                shown += 1
+            if ln is not None:
+                diff_lines.append(f"+ {ln}")
+                shown += 1
+        shown += 1
+    return "\n".join(diff_lines)
+
+
 class EditTool(BaseTool):
     """
-    精确编辑文件 — 替换 oldText 为 newText。
-    比 write 更安全，只改指定片段。
+    编辑文件 — 支持两种模式：
+    1. old_line（行号）模式：替换指定行，不依赖字符串匹配
+    2. old_text（字符串）模式：精确替换原文片段（原有行为）
+    两种模式二选一，old_line 优先。
     """
 
     def info(self) -> ToolInfo:
         return ToolInfo(
             name="edit",
-            description="替换文件中指定文本片段（oldText→newText），用于精确修改而非全文件覆盖",
+            description=("编辑文件，支持两种模式（old_line 优先）：\n"
+                        "- old_line 模式：按行号替换（推荐），格式：\"3\"（单行）\"3-7\"（范围）\"3+\"（第3行到末尾）\n"
+                        "- old_text 模式：精确匹配字符串片段（原有行为）"),
             parameters={
-                "file_path": {
+                "file_path": {"type": "string", "description": "文件路径"},
+                "old_line": {
                     "type": "string",
-                    "description": "文件路径",
-                },
+                    "description": ("行号或范围（优先于 old_text）：\n"
+                                   "  \"3\"     → 替换第 3 行\n"
+                                   "  \"3-7\"   → 替换第 3 到 7 行\n"
+                                   "  \"3+\"    → 替换第 3 行到文件末尾\n"
+                                   "  \"-5\"    → 替换倒数第 5 行到末尾\n"
+                                   "  \"3-7 new line8\" → 同时替换+插入（中间空格为新行）")},
+                "new_text": {"type": "string", "description": "替换后的内容（含换行时用 \\n）"},
                 "old_text": {
                     "type": "string",
-                    "description": "文件中必须存在的原文（必须精确匹配）",
-                },
-                "new_text": {
-                    "type": "string",
-                    "description": "替换后的内容",
-                },
+                    "description": "精确匹配要替换的原文片段（old_line 未提供时使用）"},
             },
-            required=["file_path", "old_text", "new_text"],
+            required=["file_path", "new_text"],
         )
 
-    def run(self, params: dict) -> ToolResponse:
+    def run(self, params: dict, stream_cb: "Callable[[str], None] | None" = None) -> ToolResponse:
         path = self._param(params, "file_path", "")
+        old_line = self._param(params, "old_line", "").strip()
         old_text = self._param(params, "old_text", "")
         new_text = self._param(params, "new_text", "")
 
-        if not path or not old_text:
-            return ToolResponse(content="缺少必要参数", is_error=True)
+        if not path:
+            return ToolResponse(content="缺少 file_path", is_error=True)
         p = Path(path)
         if not p.exists():
             return ToolResponse(content=f"文件不存在: {path}", is_error=True)
 
         try:
             content = p.read_text(encoding="utf-8", errors="replace")
-            if old_text not in content:
+            # 去除 splitlines 产生的尾部空串（处理文件末尾 \n）
+            has_trailing_nl = content.endswith("\n")
+            lines = content.rstrip("\n").split("\n") if content else []
+            n = len(lines)
+
+            if old_line:
+                # ---- 行号模式 ----
+                # 解析 old_line：支持 "3" "3-7" "3+" "-3"
+                # new_text_expanded: 支持 \\n 转义，并去掉末尾多余空行
+                new_text_expanded = new_text.replace(r"\n", "\n")
+                # splitlines 避免 "text\n".split("\n") 产生尾部空串的问题
+                new_text_parts = new_text_expanded.splitlines()
+
+                def parse_idx(s: str) -> int:
+                    """解析单个索引，支持负数（从末尾）"""
+                    s = s.strip()
+                    neg = s.startswith("-")
+                    s = s.lstrip("-+")
+                    idx = int(s) - 1  # 转 0-index
+                    if neg:
+                        idx = n + idx  # -1 → n-1（末尾）
+                    else:
+                        idx = max(0, idx)
+                    return idx
+
+                if "-" in old_line and not old_line.startswith("-"):
+                    # "3-7" 范围
+                    parts = old_line.split("-", 1)
+                    start = parse_idx(parts[0])
+                    end_raw = parts[1].strip()
+                    if not end_raw:
+                        end = n - 1
+                    elif end_raw.endswith("+"):
+                        end = n - 1
+                    else:
+                        end = parse_idx(end_raw)
+                    end = min(end, n - 1)
+                    if start > end:
+                        return ToolResponse(
+                            content=f"起始行 {start+1} 大于结束行 {end+1}",
+                            is_error=True)
+                    removed = "\n".join(lines[start:end + 1])
+                    new_lines = lines[:start] + new_text_parts + lines[end + 1:]
+                elif old_line.endswith("+"):
+                    # "3+" 从第3行到末尾
+                    start = parse_idx(old_line.rstrip("+"))
+                    removed = "\n".join(lines[start:])
+                    new_lines = lines[:start] + new_text_parts
+                elif old_line.startswith("-") and "-" in old_line[1:]:
+                    # "-3" 倒数第3行到末尾
+                    start = parse_idx(old_line)
+                    removed = "\n".join(lines[start:])
+                    new_lines = lines[:start] + new_text_parts
+                else:
+                    # "3" 单行
+                    start = parse_idx(old_line)
+                    removed = lines[start]
+                    new_lines = lines[:start] + new_text_parts + lines[start + 1:]
+
+                # 确定 diff 头部行号（1-indexed）
+                # 单行 "3" / 范围 "3-7" / 后缀 "3+": 行号为 start+1
+                # 负索引 "-3": 用 parse_idx(-3) 即 n-3+1 = n-2（1-indexed）
+                diff_line = start + 1  # 默认正确（单行/范围/+）
+                if old_line.startswith("-"):
+                    diff_line = parse_idx(old_line) + 1
+                diff_preview = _make_diff(removed, new_text_expanded,
+                                          path, diff_line)
+                new_content = "\n".join(new_lines)
+                if has_trailing_nl:
+                    new_content += "\n"
+                p.write_text(new_content, encoding="utf-8")
                 return ToolResponse(
-                    content="old_text 在文件中未找到，请确认原文完全匹配",
+                    content=f"已替换 {path} 行 {old_line}\n\n{diff_preview}")
+
+            elif old_text:
+                # ---- 字符串模式（原有行为） ----
+                if old_text not in content:
+                    return ToolResponse(
+                        content="old_text 在文件中未找到，请确认原文完全匹配",
+                        is_error=True)
+                new_content = content.replace(old_text, new_text, 1)
+                p.write_text(new_content, encoding="utf-8")
+                return ToolResponse(content=f"已修改 {path}")
+
+            else:
+                return ToolResponse(
+                    content="必须提供 old_line（行号）或 old_text（字符串）之一",
                     is_error=True)
-            new_content = content.replace(old_text, new_text, 1)
-            p.write_text(new_content, encoding="utf-8")
-            return ToolResponse(content=f"已修改 {path}")
+
         except Exception as e:
             return ToolResponse(content=str(e), is_error=True)
 
@@ -368,7 +488,8 @@ class BashTool(BaseTool):
             required=["command"],
         )
 
-    def run(self, params: dict) -> ToolResponse:
+    def run(self, params: dict,
+             stream_cb: "Callable[[str], None] | None" = None) -> ToolResponse:
         import shutil
         command = self._param(params, "command", "")
         cwd = self._param(params, "cwd", None)
@@ -387,27 +508,75 @@ class BashTool(BaseTool):
             shell = True  # 系统默认
 
         try:
-            result = subprocess.run(
-                command,
-                shell=shell,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=cwd,
-            )
-            out = []
-            if result.stdout:
-                out.append(result.stdout)
-            if result.stderr:
-                out.append(f"[stderr]\n{result.stderr}")
-            if result.returncode != 0 and not out:
-                out.append(f"[exit {result.returncode}]")
-            body = "\n".join(out) or f"[exit {result.returncode}]"
-            return ToolResponse(
-                content=body,
-                is_error=(result.returncode != 0),
-                metadata={"exit_code": result.returncode},
-            )
+            # 流式模式：实时输出命令行的每一行
+            if stream_cb:
+                proc = subprocess.Popen(
+                    command, shell=shell, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, cwd=cwd,
+                    text=True, errors="replace",
+                )
+                out_buf: list[str] = []
+                # 实时读 stdout/stderr（分开读取避免死锁）
+                import select as _select
+                import time as _time
+                deadline = _time.monotonic() + timeout
+                while True:
+                    remaining = max(deadline - _time.monotonic(), 0.1)
+                    # 非 Windows 用 select，Windows 退化到缓冲读
+                    rdy = []
+                    if proc.stdout:
+                        if hasattr(_select, "select"):
+                            rdy, _, _ = _select.select([proc.stdout], [], [], min(0.5, remaining))
+                        else:
+                            rdy = [proc.stdout]
+                    if proc.stderr:
+                        # Windows select 不支持管道，这里跳过 stderr 实时流，只在结束时读
+                        pass
+                    if rdy:
+                        line = proc.stdout.readline()
+                        if line:
+                            out_buf.append(line)
+                            stream_cb(line)
+                        elif proc.poll() is not None:
+                            break
+                    if proc.poll() is not None:
+                        break
+                    if _time.monotonic() >= deadline:
+                        proc.kill()
+                        stream_cb("\n[超时 killed]")
+                        break
+                    _time.sleep(0.01)
+                # 结束时读剩余 stderr
+                if proc.stderr:
+                    stderr_rem = proc.stderr.read()
+                    if stderr_rem:
+                        stream_cb(f"\n[stderr]\n{stderr_rem}")
+                exit_code = proc.wait()
+                body = "".join(out_buf) or f"[exit {exit_code}]"
+                return ToolResponse(
+                    content=body,
+                    is_error=(exit_code != 0),
+                    metadata={"exit_code": exit_code},
+                )
+            else:
+                # 非流式（原有行为）
+                result = subprocess.run(
+                    command, shell=shell, capture_output=True,
+                    text=True, timeout=timeout, cwd=cwd,
+                )
+                out = []
+                if result.stdout:
+                    out.append(result.stdout)
+                if result.stderr:
+                    out.append(f"[stderr]\n{result.stderr}")
+                if result.returncode != 0 and not out:
+                    out.append(f"[exit {result.returncode}]")
+                body = "\n".join(out) or f"[exit {result.returncode}]"
+                return ToolResponse(
+                    content=body,
+                    is_error=(result.returncode != 0),
+                    metadata={"exit_code": result.returncode},
+                )
         except subprocess.TimeoutExpired:
             return ToolResponse(content=f"命令超时（>{timeout}s）", is_error=True)
         except Exception as e:
@@ -434,7 +603,7 @@ class LsTool(BaseTool):
             required=[],
         )
 
-    def run(self, params: dict) -> ToolResponse:
+    def run(self, params: dict, stream_cb: "Callable[[str], None] | None" = None) -> ToolResponse:
         import os
         path = self._param(params, "path", ".")
         show_all = self._param(params, "all", False)
@@ -489,12 +658,13 @@ class ToolRegistry:
     def tool_infos(self) -> list[ToolInfo]:
         return [t.info() for t in self._tools.values()]
 
-    def execute(self, name: str, params: dict) -> ToolResponse:
+    def execute(self, name: str, params: dict,
+                stream_cb: "Callable[[str], None] | None" = None) -> ToolResponse:
         tool = self._tools.get(name)
         if not tool:
             return ToolResponse(content=f"未知工具: {name}", is_error=True)
         try:
-            return tool.run(params)
+            return tool.run(params, stream_cb=stream_cb)
         except Exception as e:
             return ToolResponse(content=str(e), is_error=True)
 

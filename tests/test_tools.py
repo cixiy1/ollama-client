@@ -85,6 +85,36 @@ def test_edit_tool_no_match(sandbox):
     assert res.is_error
 
 
+def test_edit_tool_old_line_single(sandbox):
+    """old_line=单行替换"""
+    f = sandbox / "hello.py"
+    f.write_text("line1\nline2\nline3\n", encoding="utf-8")
+    res = EditTool().run({"file_path": str(f), "old_line": "2",
+                          "new_text": "NEWLINE2\n"})
+    assert not res.is_error
+    assert f.read_text(encoding="utf-8") == "line1\nNEWLINE2\nline3\n"
+
+
+def test_edit_tool_old_line_range(sandbox):
+    """old_line=范围替换"""
+    f = sandbox / "hello.py"
+    f.write_text("line1\nline2\nline3\nline4\n", encoding="utf-8")
+    res = EditTool().run({"file_path": str(f), "old_line": "2-3",
+                          "new_text": "MID\n"})
+    assert not res.is_error
+    assert f.read_text(encoding="utf-8") == "line1\nMID\nline4\n"
+
+
+def test_edit_tool_old_line_suffix(sandbox):
+    """old_line=3+ 到末尾"""
+    f = sandbox / "hello.py"
+    f.write_text("line1\nline2\nline3\n", encoding="utf-8")
+    res = EditTool().run({"file_path": str(f), "old_line": "2+",
+                          "new_text": "REST\n"})
+    assert not res.is_error
+    assert f.read_text(encoding="utf-8") == "line1\nREST\n"
+
+
 def test_grep_tool_regex(sandbox):
     reg = ToolRegistry()
     res = reg.execute("grep", {"pattern": r"def \w+", "path": str(sandbox),
