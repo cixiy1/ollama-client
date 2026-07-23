@@ -1,6 +1,13 @@
 """CLI 命令行界面 — 菜单模式 + 会话历史 + 上下文感知 + 工具系统"""
 from __future__ import annotations
 
+import os, sys as _sys
+# Support: python cli/main.py (add project root to path)
+_p = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _p not in _sys.path:
+    _sys.path.insert(0, _p)
+del _p, _sys
+
 import argparse
 import json
 import os
@@ -15,25 +22,25 @@ from rich.align import Align
 from rich.spinner import Spinner
 from rich import box
 
-from .config import (
+from cli.config import (
     load, save, add, remove, rename, get_current, CONFIG_FILE)
-from .api import YukiAPI, Provider
-from .session import SessionStore, Session, Message
-from .context import (
+from cli.api import YukiAPI, Provider
+from cli.session import SessionStore, Session, Message
+from cli.context import (
     discover_context_files, summarize_contexts,
     inject_into_messages, load_context_for_directory)
-from .tools import ToolRegistry
-from .usage import UsageStore
-from .plan import cmd_plan
+from cli.tools import ToolRegistry
+from cli.usage import UsageStore
+from cli.plan import cmd_plan
 
 # 新增模块导入
-from .config_manager import ConfigManager
-from .theme import ThemeManager, Theme
-from .shortcuts import KeyboardManager, KeyboardShortcut
-from .autocomplete import CompletionEngine
-from .multi_agent import AgentOrchestrator, Agent, AgentRole
-from .agent_communication import CommunicationSystem
-from .menu_extensions import (
+from cli.config_manager import ConfigManager
+from cli.theme import ThemeManager, Theme
+from cli.shortcuts import KeyboardManager, KeyboardShortcut
+from cli.autocomplete import CompletionEngine
+from cli.multi_agent import AgentOrchestrator, Agent, AgentRole
+from cli.agent_communication import CommunicationSystem
+from cli.menu_extensions import (
     config_menu, theme_menu, shortcuts_menu, agent_menu,
     show_current_config, export_config, import_config, reset_config,
     show_config_file, fix_config, show_current_theme, switch_theme,
