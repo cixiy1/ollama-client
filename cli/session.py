@@ -321,3 +321,79 @@ class SessionStore:
                 pass
         return {"input_tokens": total_in, "output_tokens": total_out,
                 "total": total_in + total_out}
+
+    def undo_last_pair(self, session_id: str) -> bool:
+        """撤销最后一对 user+assistant 消息（保留 system）"""
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                "SELECT id, role, timestamp FROM messages WHERE session_id=? "
+                "AND role IN ('user', 'assistant') ORDER BY timestamp DESC LIMIT 2",
+                (session_id,),
+            ).fetchall()
+            if len(cur) < 2:
+                return False
+            ids = [row[0] for row in cur]
+            conn.execute(
+                "DELETE FROM messages WHERE id=? OR id=?",
+                (ids[0], ids[1]),
+            )
+            conn.execute(
+                "UPDATE sessions SET updated_at=? WHERE id=?",
+                (time.time(), session_id),
+            )
+        return True
+
+    def compact_messages(self, session_id: str, keep_last: int = 3) -> int:
+        """紧凑对话历史：保留最近 N 条，将旧消息合并成摘要
+        返回被删除的消息数量"""
+        session = self.get_session(session_id)
+        if not session or len(session.messages) <= keep_last:
+            return 0
+        
+        msgs = session.messages
+        old_msgs = msgs[:-keep_last] if keep_last > 0 else msgs
+        if not old_msgs:
+            return 0
+        
+        # 生成摘要
+        summary = self._generate_summary(old_msgs)
+        
+        with sqlite3.connect(self.db_path) as conn:
+            # 删除旧消息
+            cur = conn.execute(
+                "DELETE FROM messages WHERE session_id=? AND id IN ("
+                "SELECT id FROM messages WHERE session_id=? "
+                "ORDER BY timestamp ASC LIMIT ?)",
+                (session_id, session_id, len(old_msgs)),
+            )
+            deleted = cur.rowcount
+            # 插入摘要消息
+            conn.execute(
+                "INSERT INTO messages (id,session_id,role,content,thinking,model,timestamp) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (str(uuid.uuid4())[:12], session_id, "system", summary, "", model, time.time()),
+            )
+            conn.execute(
+                "UPDATE sessions SET updated_at=? WHERE id=?",
+                (time.time(), session_id),
+            )
+        return deleted
+
+    def _generate_summary(self, messages: list[Message]) -> str:
+        """为消息列表生成简洁摘要"""
+        if not messages:
+            return ""
+        
+        user_inputs = [m.content[:100] for m in messages if m.role == "user"]
+        assistant_outputs = [m.content[:100] for m in messages if m.role == "assistant"]
+        
+        lines = ["=== 对话历史摘要 ==="]
+        lines.append(f"\u4ee5\u524d {len(user_inputs)} \u8f6e\u5bf9\u8bdd:")
+        
+        for i, (ui, ao) in enumerate(zip(user_inputs, assistant_outputs), 1):
+            ui_safe = ui.replace("\n", " ")
+            ao_safe = ao.replace("\n", " ")
+            lines.append(f"{i}. \u7528\u6237: {ui_safe}")
+            lines.append(f"   \u52a9\u624b: {ao_safe}")
+        
+        return "\n".join(lines)

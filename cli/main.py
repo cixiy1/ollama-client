@@ -391,6 +391,10 @@ def cmd_chat(api: YukiAPI, model: str, system: str | None, temp: float,
                 "[cyan]/sessions[/]  列出历史会话\n"
                 "[cyan]/usage[/]     查看 Token 用量\n"
                 "[cyan]/contexts[/]  查看当前上下文文件\n"
+                "[cyan]/plan[/]      Plan Mode（只读分析，生成执行计划）\n"
+                "[cyan]/retry[/]     重试上一次对话\n"
+                "[cyan]/undo[/]      撤销最后一轮对话\n"
+                "[cyan]/compact[/]   紧凑对话历史（保留最近 3 条）\n"
                 "[cyan]/quit[/]      退出",
                 title="[bold]对话指令[/]", border_style="cyan",
                 box=box.ROUNDED, expand=False, padding=(0, 2)))
@@ -423,6 +427,60 @@ def cmd_chat(api: YukiAPI, model: str, system: str | None, temp: float,
                 console.print(summarize_contexts(contexts))
             else:
                 console.print("[dim]未发现上下文规范文件[/]")
+            continue
+        if user_input == "/plan":
+            console.print("[dim]Plan Mode（只读分析）...[/]")
+            cmd_plan()
+            continue
+        if user_input == "/retry":
+            if len(messages) < 2:
+                console.print("[yellow]没有可重试的对话历史[/]")
+                continue
+            last_user = None
+            for m in reversed(messages):
+                if m.get("role") == "user":
+                    last_user = m
+                    break
+            if not last_user:
+                console.print("[yellow]没有找到用户消息[/]")
+                continue
+            console.print(f"[dim]重试: {last_user['content'][:50]}...[/]")
+            messages.append({"role": "user", "content": last_user['content']})
+            _session_store.add_message(session.id, Message(
+                role="user", content=last_user['content'], model=model))
+            response = ""
+            try:
+                response = _stream_and_render(
+                    api.chat(model, messages, temperature=temp, stream=True),
+                    title=model)
+            except KeyboardInterrupt:
+                print()
+                console.print("[yellow]已中断生成[/]")
+                break
+            messages.append({"role": "assistant", "content": response})
+            _session_store.add_message(session.id, Message(
+                role="assistant", content=response, model=model))
+            if session.title == "新对话":
+                _session_store.auto_title(session.id)
+            continue
+        if user_input == "/undo":
+            if _session_store.undo_last_pair(session.id):
+                messages = [m for m in messages if m.get("role") == "system"]
+                session = _session_store.get_session(session.id)
+                messages = [{"role": m.role, "content": m.content} for m in session.messages]
+                console.print("[dim]已撤销最后一轮对话[/]")
+            else:
+                console.print("[yellow]没有可撤销的对话历史[/]")
+            continue
+        if user_input == "/compact":
+            deleted = _session_store.compact_messages(session.id, keep_last=3)
+            if deleted > 0:
+                messages = [m for m in messages if m.get("role") == "system"]
+                session = _session_store.get_session(session.id)
+                messages = [{"role": m.role, "content": m.content} for m in session.messages]
+                console.print(f"[dim]已紧凑对话历史，删除 {deleted} 条旧消息[/]")
+            else:
+                console.print("[yellow]没有需要紧凑的消息[/]")
             continue
 
         messages.append({"role": "user", "content": user_input})
