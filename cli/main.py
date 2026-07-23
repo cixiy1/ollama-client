@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from rich.console import Console, Group
 from rich.panel import Panel
 from rich.live import Live
